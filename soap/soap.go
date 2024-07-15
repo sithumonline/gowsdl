@@ -10,7 +10,11 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 type SOAPEncoder interface {
@@ -238,6 +242,13 @@ type basicAuth struct {
 	Password string
 }
 
+type Logger interface {
+	DebugCtx(ctx context.Context, msg string, fields ...zapcore.Field)
+	InfoCtx(ctx context.Context, msg string, fields ...zapcore.Field)
+	WarnCtx(ctx context.Context, msg string, fields ...zapcore.Field)
+	ErrorCtx(ctx context.Context, msg string, fields ...zapcore.Field)
+}
+
 type options struct {
 	tlsCfg           *tls.Config
 	auth             *basicAuth
@@ -248,6 +259,8 @@ type options struct {
 	httpHeaders      map[string]string
 	mtom             bool
 	mma              bool
+	logger           Logger
+	dump             bool
 }
 
 var defaultOptions = options{
@@ -326,6 +339,18 @@ func WithMTOM() Option {
 func WithMIMEMultipartAttachments() Option {
 	return func(o *options) {
 		o.mma = true
+	}
+}
+
+func WithLogger(logger Logger) Option {
+	return func(o *options) {
+		o.logger = logger
+	}
+}
+
+func WithDump() Option {
+	return func(o *options) {
+		o.dump = true
 	}
 }
 
@@ -486,11 +511,29 @@ func (s *Client) call(ctx context.Context, soapAction string, request, response 
 		client = &http.Client{Timeout: s.opts.contimeout, Transport: tr}
 	}
 
+	if s.opts.dump && s.opts.logger != nil {
+		bbReqDump, _ := httputil.DumpRequestOut(req, true)
+		s.opts.logger.DebugCtx(
+			ctx, "request ready to be sent",
+			zap.String("method", req.Method),
+			zap.String("url", req.URL.String()),
+			zap.ByteString("request", bbReqDump),
+		)
+	}
+
 	res, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
+
+	if s.opts.dump && s.opts.logger != nil {
+		bbRspDump, _ := httputil.DumpResponse(res, true)
+		s.opts.logger.DebugCtx(
+			ctx, "response received",
+			zap.ByteString("response", bbRspDump),
+		)
+	}
 
 	if res.StatusCode >= 400 && res.StatusCode != 500 {
 		body, _ := ioutil.ReadAll(res.Body)
